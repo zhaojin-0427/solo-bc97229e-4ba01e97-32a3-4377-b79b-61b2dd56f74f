@@ -17,7 +17,8 @@ from flask import (
 )
 
 from . import config
-from .models import FINAL_STATES, RETRYABLE_STATES, TaskStore
+from .lock_demo import LockDemo
+from .models import FINAL_STATES, RETRYABLE_STATES, LockTimeout, TaskStore
 from .worker import Worker
 
 log = logging.getLogger("collector.web")
@@ -33,14 +34,29 @@ def create_app() -> Flask:
     app = Flask(__name__)
     store = TaskStore()
     worker = Worker(store)
+    lock_demo = LockDemo()
 
     # 上次进程遗留的未完成任务统一转为可重试失败态。
-    recovered = store.recover_stale()
+    try:
+        recovered = store.recover_stale()
+    except LockTimeout:
+        # 启动即遇外部写锁：不阻断启动，巡检会在解锁后处理。
+        log.warning("启动恢复被写锁阻塞，将由 worker 巡检自动接续")
+        recovered = 0
     if recovered:
         log.warning("启动恢复：%s 个中断任务标记为 failed 可重试", recovered)
     worker.start()
     app.extensions["store"] = store
     app.extensions["worker"] = worker
+
+    @app.errorhandler(LockTimeout)
+    def _lock_timeout(_err):
+        # 写锁仍被其他连接占用：提示客户端稍后重试，服务本身保持可用。
+        return (
+            jsonify({"ok": False, "error": "任务库正忙（写锁占用），请稍后重试"}),
+            503,
+            {"Retry-After": "1"},
+        )
 
     # ---- 页面 -----------------------------------------------------------
     @app.get("/")
@@ -51,6 +67,8 @@ def create_app() -> Flask:
             tasks=tasks,
             portal_url=config.PORTAL_URL,
             final_states=FINAL_STATES,
+            lock_active=lock_demo.active,
+            lock_remaining=round(lock_demo.remaining(), 1),
         )
 
     # ---- API ------------------------------------------------------------
@@ -117,7 +135,36 @@ def create_app() -> Flask:
 
     @app.get("/healthz")
     def healthz():
+        # 即便演示写锁占用，健康检查与只读状态也必须即时响应。
         return {"status": "ok"}, 200
+
+    # ---- 写锁容错演示 ----------------------------------------------------
+    @app.post("/demo/lock")
+    def demo_lock():
+        """模拟另一连接持有任务库写锁，验证等待与解锁自动接续。"""
+        try:
+            seconds = float(request.form.get("seconds", "8"))
+        except (TypeError, ValueError):
+            return _bad_request("seconds 必须是数字秒数")
+        held = lock_demo.acquire(seconds)
+        worker.notify()
+        if request.form.get("html"):
+            return redirect(url_for("index_page"))
+        return jsonify({"ok": True, "hold_seconds": held,
+                        "active": lock_demo.active}), 200
+
+    @app.post("/demo/lock/release")
+    def demo_lock_release():
+        lock_demo.release()
+        worker.notify()
+        if request.form.get("html"):
+            return redirect(url_for("index_page"))
+        return jsonify({"ok": True, "active": lock_demo.active})
+
+    @app.get("/demo/lock")
+    def demo_lock_status():
+        return jsonify({"active": lock_demo.active,
+                        "remaining": round(lock_demo.remaining(), 1)})
 
     return app
 

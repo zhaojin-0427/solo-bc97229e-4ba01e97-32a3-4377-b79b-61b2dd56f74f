@@ -71,7 +71,32 @@
           <button class="btn-primary" type="submit">提交采集</button>
         </div>
       </form>
-      <p class="hint">任务进入队列后由唯一 worker 依次执行；同一时刻只有一个任务占用门户会话，筛选到下载全程不交叉。</p>
+      <p class="hint">任务进入队列后由唯一 worker 依次执行；同一时刻只有一个任务占用门户会话，筛选到下载全程不交叉。遇到任务库临时写锁时自动等待，解锁后接续，不中断、不重导。</p>
+    </section>
+
+    <section class="card">
+      <h2>写锁容错演示</h2>
+      <p class="hint" style="margin-top:0">
+        模拟「另一连接持有任务库写锁」。持锁期间新建/领取/发布提交会等待，
+        但本页面与状态查询照常响应、worker 不退出；解锁后队列自动接续，无需重启或人工重试。
+      </p>
+      {% if lock_active %}
+      <p style="color:#9a3412;font-size:13px;margin:6px 0">
+        写锁占用中，剩余约 {{ lock_remaining }} 秒——此时刷新页面、查看状态均正常。
+      </p>
+      {% endif %}
+      <div class="row">
+        <form method="post" action="/demo/lock" style="display:inline">
+          <input type="hidden" name="html" value="1">
+          <input type="number" name="seconds" value="8" min="1" max="30"
+                 style="min-width:90px" aria-label="持锁秒数"> 秒
+          <button class="btn-warn" type="submit">持有写锁</button>
+        </form>
+        <form method="post" action="/demo/lock/release" style="display:inline">
+          <input type="hidden" name="html" value="1">
+          <button class="btn-gray" type="submit">立即解锁</button>
+        </form>
+      </div>
     </section>
 
     <section class="card">
